@@ -2,6 +2,18 @@
 
 All notable changes to Baloney. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.0.1] — 2026-11-24
+
+Documentation and packaging cleanup.
+
+### Changed
+
+- README now carries CI, Node, licence and version badges, a contents list and
+  links to the self-hosting, game-rules and contributing docs.
+- `.env.example` was trimmed to the two required values and one optional
+  `GUILD_ID` line.
+- Version bumped to 2.0.1.
+
 ## [2.0.0] — 2026-11-24
 
 The "whole night" release: nine games, party mode and free progression.

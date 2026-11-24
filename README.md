@@ -5,7 +5,7 @@
 [![CI](https://github.com/AverageDeveloper517/baloney/actions/workflows/ci.yml/badge.svg)](https://github.com/AverageDeveloper517/baloney/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.0.0-5865f2)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.0.1-5865f2)](CHANGELOG.md)
 
 Run a command, press **Join**, and the whole game lives inside a single message
 that edits itself. No dashboard, no API keys, no accounts, no paid commands, no
@@ -15,7 +15,7 @@ premium tier. Invite it and play.
 `/impostor` · `/scatter` — plus `/party` for a whole night of games with one
 champion.
 
-**Repo:** <https://github.com/AverageDeveloper517/baloney> · **Version 2.0.0**
+**Repo:** <https://github.com/AverageDeveloper517/baloney> · **Version 2.0.1**
 
 <details>
 <summary><strong>Contents</strong></summary>
@@ -337,6 +337,8 @@ npm run test:coverage
 - progression: level curve, XP/coins, all 28 badges, daily streaks, theme buying
 - content banks: unique ids, no leaked answers, disjoint bluff packs, balanced
   trivia answers and the exact scatter letter set
+
+CI runs the same suite on Node 20 and 22 for every push and pull request.
 
 The game logic has no `discord.js` import, which is why the whole loop runs
 headlessly.

@@ -11,7 +11,7 @@ import { inviteUrl } from './permissions.js';
 import { log } from './log.js';
 
 const SWEEP_MS = 10 * 60_000;
-const VERSION = '2.0.0';
+const VERSION = '2.0.1';
 
 export async function start() {
   const token = requireToken();

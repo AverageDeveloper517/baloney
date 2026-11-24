@@ -1,6 +1,6 @@
 {
   "name": "baloney",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "private": true,
   "type": "module",
   "description": "Nine zero-setup Discord party games, one message per game, no keys and no paid commands.",
