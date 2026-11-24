@@ -71,7 +71,7 @@ export class BluffGame extends Lobby {
     this.votes = new Map();
     this.reveal = null;
     this.phase = 'submit';
-    this.phaseEndsAt = this.clock() + BLUFF_TIMING.submit;
+    this.phaseEndsAt = this.clock() + this.ms(BLUFF_TIMING.submit);
   }
 
   tick(now = this.clock()) {
@@ -112,19 +112,37 @@ export class BluffGame extends Lobby {
     return this.active().every((player) => this.submissions.has(player.id));
   }
 
+  /** The generic modal the service opens when someone presses "Write". */
+  writeForm() {
+    if (this.phase !== 'submit' || !this.prompt) return null;
+    return {
+      title: 'your lie',
+      customId: `gm:${this.id}`,
+      inputs: [
+        {
+          id: 'lie',
+          label: `Fill the blank: ${String(this.prompt.prompt).replace(/_{2,}/g, '____')}`.slice(0, 45),
+          placeholder: 'make it sound true',
+          min: 2,
+          max: BLUFF_LIMITS.answerLength
+        }
+      ]
+    };
+  }
+
   /**
    * A lie is stored once per unique text. Duplicates merge authors, so nobody
    * is punished for thinking like someone else. Writing the actual answer is
    * allowed, but you sit out the vote because you already know it.
    */
-  submit(userId, text) {
+  submit(userId, input) {
     if (this.phase !== 'submit') return { ok: false, reason: 'phase' };
 
     const player = this.get(userId);
     if (!player || player.left) return { ok: false, reason: 'player' };
     if (this.submissions.has(userId)) return { ok: false, reason: 'already' };
 
-    const value = clean(text);
+    const value = clean(typeof input === 'string' ? input : input?.lie);
     if (value.length < 2) return { ok: false, reason: 'short' };
     if (value.length > BLUFF_LIMITS.answerLength) return { ok: false, reason: 'long' };
 
@@ -171,7 +189,7 @@ export class BluffGame extends Lobby {
     }));
 
     this.phase = 'vote';
-    this.phaseEndsAt = now + BLUFF_TIMING.vote;
+    this.phaseEndsAt = now + this.ms(BLUFF_TIMING.vote);
 
     // No lies at all: there is nothing to vote on, so reveal immediately.
     if (!lies.length) {
@@ -245,6 +263,7 @@ export class BluffGame extends Lobby {
         player.score += BLUFF_POINTS.fooled * option.votes;
         player.fooled = (player.fooled ?? 0) + option.votes;
         player.best = Math.max(player.best ?? 0, option.votes);
+        if (option.votes >= 5) player.flags.add('big-lie');
       }
     }
 
@@ -263,7 +282,7 @@ export class BluffGame extends Lobby {
 
     this.history.push(this.reveal);
     this.phase = 'reveal';
-    this.phaseEndsAt = now + BLUFF_TIMING.reveal;
+    this.phaseEndsAt = now + this.ms(BLUFF_TIMING.reveal);
     return true;
   }
 
@@ -377,7 +396,7 @@ export class BluffGame extends Lobby {
     }
 
     return {
-      color: COLORS.submit,
+      color: COLORS.play,
       title: `round ${this.round}/${this.rounds} · write a lie`,
       description: `**${renderPrompt(this.prompt.prompt)}**\n\nmake up an answer that sounds real. don't look it up.`,
       fields,
@@ -452,7 +471,8 @@ export class BluffGame extends Lobby {
 
   finalView() {
     const standings = this.standings();
-    const winners = standings.filter((player) => player.score === standings[0].score && player.score > 0);
+    const top = standings[0]?.score ?? 0;
+    const winners = standings.filter((player) => player.score === top && player.score > 0);
     const line = winners.length
       ? winners.length === 1
         ? `**${winners[0].name}** wins with ${winners[0].score} points.`
@@ -475,6 +495,11 @@ export class BluffGame extends Lobby {
 
   nameOf(userId) {
     return this.get(userId)?.name ?? 'someone';
+  }
+
+  voteLabel(key) {
+    const option = this.options.find((entry) => entry.key === key);
+    return option ? option.text : String(key);
   }
 }
 

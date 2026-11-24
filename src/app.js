@@ -11,6 +11,7 @@ import { inviteUrl } from './permissions.js';
 import { log } from './log.js';
 
 const SWEEP_MS = 10 * 60_000;
+const VERSION = '2.0.0';
 
 export async function start() {
   const token = requireToken();
@@ -26,11 +27,15 @@ export async function start() {
   client.on(Events.InteractionCreate, createRouter({ client, service, store, invite, log }));
 
   client.once(Events.ClientReady, async (ready) => {
-    log.ok(`online as ${ready.user.tag} · ${ready.guilds.cache.size} server(s) · ${commands.size} commands`);
-    ready.user.setActivity('/bluff — start a game', { type: ActivityType.Playing });
+    log.ok(
+      `Baloney ${VERSION} online as ${ready.user.tag} · ${ready.guilds.cache.size} server(s) · ${commands.size} commands`
+    );
+    ready.user.setActivity('/party — nine games, one lobby', { type: ActivityType.Playing });
 
     if (!invite) {
       log.warn('CLIENT_ID is not set, so invite links are hidden. `npm run doctor` explains it.');
+    } else {
+      log.info(`invite: ${invite}`);
     }
   });
 

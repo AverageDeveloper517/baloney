@@ -1,169 +1,235 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { BluffGame } from '../src/games/bluff.js';
-import { MostLikelyGame } from '../src/games/mostlikely.js';
-import { PROMPTS } from '../src/content/prompts.js';
-import { SITUATIONS } from '../src/content/situations.js';
+import { table, assertPayload, CLOCK, INVITE, IDS } from '../test-support/helpers.js';
+import { GAME_DEFS } from '../src/games/index.js';
 import { toPayload } from '../src/ui.js';
 
-const CLOCK = 5_000_000;
-const INVITE = 'https://discord.com/oauth2/authorize?client_id=1&scope=bot';
+const KINDS = Object.keys(GAME_DEFS);
 
-function bluff(players = 3, rounds = 1) {
-  const game = new BluffGame({
-    channelId: 'c1',
-    hostId: 'u1',
-    prompts: PROMPTS,
-    rounds,
-    rng: () => 0.29,
-    clock: () => CLOCK
-  });
-  for (let i = 1; i <= players; i += 1) game.add({ id: `u${i}`, name: `player ${i}` });
-  return game;
-}
+/** Put a legal action in for every active player, whatever the phase wants. */
+function fill(game) {
+  const active = game.active();
+  const ids = active.map((player) => player.id);
 
-function mostlikely(players = 3, rounds = 1) {
-  const game = new MostLikelyGame({
-    channelId: 'c1',
-    hostId: 'u1',
-    situations: SITUATIONS,
-    rounds,
-    rng: () => 0.53,
-    clock: () => CLOCK
-  });
-  for (let i = 1; i <= players; i += 1) game.add({ id: `u${i}`, name: `player ${i}` });
-  return game;
-}
+  switch (game.kind) {
+    case 'bluff':
+      if (game.phase === 'submit') for (const id of ids) game.submit(id, { lie: `a lie from ${id}` });
+      if (game.phase === 'vote') {
+        for (const id of ids) {
+          const option = game.options.find((entry) => !entry.authors.includes(id));
+          if (option) game.vote(id, option.key);
+        }
+      }
+      break;
 
-function assertPayload(view, { expectInvite = false } = {}) {
-  const payload = toPayload(view, { invite: INVITE });
-  const embed = payload.embeds[0].data;
+    case 'mostlikely':
+      if (game.phase === 'vote') {
+        for (const [index, id] of ids.entries()) game.vote(id, ids[(index + 1) % ids.length]);
+      }
+      break;
 
-  assert.ok((embed.title ?? '').length <= 256, 'title fits');
-  assert.ok((embed.description ?? '').length <= 4_096, 'description fits');
-  assert.ok((embed.footer?.text ?? '').length <= 2_048, 'footer fits');
-  assert.ok((embed.fields ?? []).length <= 25, 'field count fits');
+    case 'trivia':
+      if (game.phase === 'play') {
+        for (const [index, id] of ids.entries()) game.vote(id, String(index % 4));
+      }
+      break;
 
-  for (const field of embed.fields ?? []) {
-    assert.ok(field.name.length <= 256, `field name fits: ${field.name}`);
-    assert.ok(field.value.length <= 1_024, `field value fits: ${field.name}`);
+    case 'wyr':
+      if (game.phase === 'play') {
+        for (const [index, id] of ids.entries()) game.vote(id, index % 2 ? 'b' : 'a');
+      }
+      break;
+
+    case 'number':
+      if (game.phase === 'play') {
+        for (const [index, id] of ids.entries()) game.submit(id, { number: String(20 + index) });
+      }
+      break;
+
+    case 'duel':
+      if (game.phase === 'play') {
+        game.vote(ids[0], 'rock');
+        game.vote(ids[1], 'paper');
+      }
+      break;
+
+    case 'chain':
+      if (game.phase === 'submit') for (const [index, id] of ids.entries()) game.submit(id, { line: `line ${index} from ${id}` });
+      if (game.phase === 'vote') {
+        for (const id of ids) {
+          const option = game.options.find((entry) => entry.authorId !== id);
+          if (option) game.vote(id, option.key);
+        }
+      }
+      break;
+
+    case 'impostor':
+      if (game.phase === 'brief') for (const id of ids) game.markSeen(id);
+      if (game.phase === 'clue') for (const [index, id] of ids.entries()) game.submit(id, { clue: `clue ${index}` });
+      if (game.phase === 'vote') {
+        for (const [index, id] of ids.entries()) {
+          const target = ids[(index + 1) % ids.length];
+          if (target !== id) game.vote(id, target);
+        }
+      }
+      break;
+
+    case 'scatter': {
+      if (game.phase === 'play') {
+        const letter = game.letter;
+        for (const [index, id] of ids.entries()) {
+          game.submit(id, {
+            c0: `${letter}ap${index}`,
+            c1: `${letter}it${index}`,
+            c2: `${letter}op${index}`
+          });
+        }
+      }
+      break;
+    }
+
+    default:
+      break;
   }
+}
 
-  assert.ok(payload.components.length <= 5, 'row count fits');
+test('every game renders its lobby, every action phase and its final card', () => {
+  for (const kind of KINDS) {
+    const def = GAME_DEFS[kind];
+    const players = Math.min(def.max, 10);
 
-  for (const row of payload.components) {
-    assert.ok(row.components.length <= 5, 'button count per row fits');
-    for (const button of row.components) {
-      const data = button.data;
-      assert.ok((data.label ?? '').length <= 80, 'label fits');
-      if (data.custom_id) assert.ok(data.custom_id.length <= 100, 'custom id fits');
+    const lobby = table(kind, { players, start: false });
+    assert.equal(lobby.phase, 'lobby');
+    assertPayload(lobby.view());
+
+    const lobbyPayload = toPayload(lobby.view());
+    const ids = lobbyPayload.components.flatMap((row) => row.components.map((button) => button.data.custom_id));
+    assert.ok(ids.includes(`${def.ns}:${lobby.id}:join`), `${kind} lobby has a join button`);
+    assert.ok(ids.includes(`${def.ns}:${lobby.id}:start`), `${kind} lobby has a start button`);
+
+    const game = table(kind, { players });
+    const phases = new Set();
+
+    for (let step = 0; step < 60; step += 1) {
+      assert.ok(game.phase !== 'dead', `${kind} should not time out during a legal game`);
+      phases.add(game.phase);
+
+      const payload = assertPayload(game.view(), {
+        invite: INVITE,
+        expectInvite: Boolean(game.view().invite)
+      });
+
+      if (game.phase === 'done') {
+        assert.equal(payload.components.some((row) => row.components.some((button) => !button.data.url)), false, `${kind} final has no dead buttons`);
+        break;
+      }
+
+      fill(game);
+      const moved = game.advanceIfReady(CLOCK);
+      assertPayload(game.view());
+
+      if (!moved && game.phase !== 'done') {
+        assert.ok(game.phaseEndsAt, `${kind} has a deadline in ${game.phase}`);
+        game.tick(game.phaseEndsAt);
+      }
+    }
+
+    assert.equal(game.phase, 'done', `${kind} reaches a final card`);
+    assert.ok(phases.has('done'), `${kind} covered the final card`);
+    assert.ok(phases.has('play') || phases.has('submit') || phases.has('vote') || phases.has('brief'), `${kind} covered an action phase`);
+  }
+});
+
+test('every write form is a gm: modal with one to five short inputs', () => {
+  const cases = [
+    ['bluff', 'submit'],
+    ['number', 'play'],
+    ['chain', 'submit'],
+    ['impostor', 'clue'],
+    ['scatter', 'play']
+  ];
+
+  for (const [kind, phase] of cases) {
+    const game = table(kind, { players: 3 });
+    if (kind === 'impostor') {
+      for (const id of ['u1', 'u2', 'u3']) game.markSeen(id);
+      game.advanceIfReady(CLOCK);
+    }
+    assert.equal(game.phase, phase, `${kind} is in ${phase}`);
+
+    const form = game.writeForm();
+    assert.ok(form, `${kind} has a form`);
+    assert.match(form.customId, /^gm:/);
+    assert.ok(form.title.length > 0 && form.title.length <= 45);
+    assert.ok(form.inputs.length >= 1 && form.inputs.length <= 5);
+    for (const input of form.inputs) {
+      assert.ok(input.label.length > 0 && input.label.length <= 45);
+      assert.ok((input.placeholder ?? '').length <= 100);
     }
   }
-
-  if (expectInvite) {
-    const last = payload.components.at(-1)?.components?.[0]?.data;
-    assert.equal(last?.url, INVITE);
-  }
-
-  return payload;
-}
-
-test('every bluff screen fits inside a Discord message', () => {
-  const game = bluff(4, 2);
-  assertPayload(game.view());
-
-  game.start();
-  assertPayload(game.view());
-
-  for (const id of ['u1', 'u2', 'u3', 'u4']) {
-    game.submit(id, `lie number ${id}`);
-  }
-  game.closeSubmissions();
-  assertPayload(game.view());
-
-  game.vote('u1', game.options.find((option) => option.truth).key);
-  game.closeVotes();
-  assertPayload(game.view());
-
-  game.nextRound();
-  game.submit('u1', game.prompt.answer);
-  game.submit('u2', 'lie');
-  game.submit('u3', 'another lie');
-  game.submit('u4', 'third lie');
-  game.closeSubmissions();
-  game.closeVotes();
-  game.nextRound();
-
-  assert.equal(game.phase, 'done');
-  assertPayload(game.view(), { expectInvite: true });
 });
 
-test('a full table of maximum-length lies still fits', () => {
-  const game = bluff(10, 1);
-  game.start();
+test('a maximum table with maximum-length names still fits every screen', () => {
+  const name = 'a very long player name that should be cut down to size';
 
-  const long = (n) => `lie ${n} `.padEnd(80, 'x').slice(0, 80);
-  for (let i = 1; i <= 10; i += 1) game.submit(`u${i}`, long(i));
+  for (const kind of ['bluff', 'trivia', 'chain', 'impostor']) {
+    const game = table(kind, { players: 10 });
+    for (const player of game.players) player.name = name;
+    if (kind === 'impostor') {
+      for (const id of IDS.slice(0, 10)) game.markSeen(id);
+      game.advanceIfReady(CLOCK);
+    }
+    assertPayload(game.view());
 
-  game.closeSubmissions();
-  assert.equal(game.options.length, 11);
-  assertPayload(game.view());
-
-  for (let i = 1; i <= 10; i += 1) {
-    const key = game.options.find((option) => !option.authors.includes(`u${i}`))?.key;
-    if (key) game.vote(`u${i}`, key);
+    if (kind === 'bluff') {
+      for (const player of game.players) game.submit(player.id, { lie: 'x'.repeat(400) });
+      game.advanceIfReady(CLOCK);
+    }
+    if (kind === 'chain') {
+      for (const player of game.players) game.submit(player.id, { line: 'y'.repeat(400) });
+      game.advanceIfReady(CLOCK);
+    }
+    assertPayload(game.view());
   }
-  game.closeVotes();
-  assertPayload(game.view());
 });
 
-test('every most likely to screen fits, including a ten-player vote', () => {
-  const game = mostlikely(10, 2);
-  assertPayload(game.view());
-
-  game.start();
-  const vote = assertPayload(game.view());
-  assert.ok(vote.components.length >= 2, 'ten names need two rows');
-
-  for (let i = 1; i <= 10; i += 1) {
-    game.vote(`u${i}`, `u${((i + 1) % 10) + 1}`);
-  }
-  game.closeVotes();
-  assertPayload(game.view());
-
-  game.nextRound();
-  game.closeVotes();
-  game.nextRound();
-
-  assert.equal(game.phase, 'done');
-  assertPayload(game.view(), { expectInvite: true });
-});
-
-test('the invite button only appears when a client id exists', () => {
-  const game = bluff(3, 1);
-  game.start();
-  for (const id of ['u1', 'u2', 'u3']) game.submit(id, `lie ${id}`);
-  game.closeSubmissions();
-  game.closeVotes();
-  game.nextRound();
+test('the invite button only appears when an invite is supplied', () => {
+  const game = table('trivia', { players: 3, rounds: 1 });
+  game.vote('u1', '0');
+  game.vote('u2', '1');
+  game.vote('u3', '2');
+  game.advanceIfReady(CLOCK);
+  game.tick(game.phaseEndsAt);
 
   const without = toPayload(game.view());
   assert.equal(without.components.length, 0);
 
   const withInvite = toPayload(game.view(), { invite: INVITE });
-  assert.equal(withInvite.components.at(-1).components[0].data.url, INVITE);
+  const last = withInvite.components.at(-1).components[0].data;
+  assert.equal(last.url, INVITE);
 });
 
 test('player-written text cannot inject a ping or a mention', () => {
-  const game = bluff(3, 1);
-  game.start();
-  game.submit('u1', '@everyone look at this');
-  game.submit('u2', '<@123456789012345678> hi');
-  game.submit('u3', '```discord.gg/example```');
-  game.closeSubmissions();
+  const game = table('bluff', { players: 3, rounds: 1 });
+  game.submit('u1', { lie: '@everyone look at this' });
+  game.submit('u2', { lie: '<@123456789012345678> hi' });
+  game.submit('u3', { lie: '```discord.gg/example```' });
+  game.advanceIfReady(CLOCK);
 
   const payload = assertPayload(game.view());
   assert.deepEqual(payload.allowedMentions, { parse: [] });
   assert.equal(JSON.stringify(payload.embeds[0].data).includes('<@123456789012345678>'), false);
+  assert.equal(JSON.stringify(payload.embeds[0].data).includes('@everyone'), false);
+});
+
+test('a cancelled or timed-out lobby renders an honest closed card', () => {
+  for (const kind of ['trivia', 'chain', 'scatter']) {
+    const game = table(kind, { players: 2, start: false });
+    game.cancel();
+    const payload = assertPayload(game.view());
+    assert.equal(payload.embeds[0].data.title, 'nobody started');
+    assert.match(payload.embeds[0].data.footer.text, /\/help/);
+    assert.equal(payload.components.length, 0);
+  }
 });

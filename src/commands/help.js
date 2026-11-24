@@ -2,49 +2,75 @@ import { SlashCommandBuilder } from 'discord.js';
 
 import { toPayload } from '../ui.js';
 
+const GAMES = [
+  ['bluff', 'one truth, a pile of lies'],
+  ['mostlikely', 'no typing, one tap per round'],
+  ['trivia', 'five questions, four buttons'],
+  ['wyr', 'would you rather, majority wins'],
+  ['number', 'guess closest to the secret number'],
+  ['duel', 'two players, rock paper scissors'],
+  ['chain', 'one sentence each, vote for the best'],
+  ['impostor', 'one player has a different word'],
+  ['scatter', 'one letter, three categories']
+];
+
 export default {
-  data: new SlashCommandBuilder().setName('help').setDescription('how Baloney works, and what it asks for'),
+  data: new SlashCommandBuilder().setName('help').setDescription('all nine games, the party mode, and exactly what Baloney asks for'),
 
   ephemeral: false,
 
   async run({ interaction, invite }) {
+    const games = GAMES.map(([name, blurb]) => `**/${name}** · ${blurb}`).join('\n');
+
     return interaction.reply(
       toPayload(
         {
           color: 0xf2b544,
-          title: 'Baloney',
+          title: 'Baloney · a party in one message',
           description:
-            '**a party in one message.** one prompt has a real answer; every other option was written by someone in the channel.\n\n' +
-            'write a lie that sounds true. then vote for the answer you think is real.',
+            '**nine games, zero setup.** run a command, press Join, and the whole game lives in one message that keeps editing itself.\n\n' +
+            'no accounts, no API keys, no paid commands, nothing to configure. progress is cosmetic and earned by playing.',
           fields: [
+            { name: 'pick a game', value: games, inline: false },
             {
-              name: 'play in twenty seconds',
+              name: 'the whole night · /party',
               value:
-                '`/bluff` opens a lobby\npress **Join** · the host presses **Start**\nwrite a lie, then vote for the truth\n\n' +
-                '`/mostlikely` is the no-typing version: one tap per round.'
+                '**quick** · trivia, would you rather, number\n' +
+                '**classic** · bluff, trivia, most likely to\n' +
+                '**chaos** · scatter, impostor, chain\n' +
+                '**marathon** · six games, one champion\n\n' +
+                'One lobby, games back to back, 5/3/2/1 points per game.',
+              inline: false
             },
             {
-              name: 'the two games',
+              name: 'your progress',
               value:
-                '**Bluff** · 3 rounds by default · 60s to write · 45s to vote\n' +
-                '**Most likely to** · 3 rounds · 35s to vote · about two minutes total\n\n' +
-                'Both support 3–10 players and run entirely in the channel message.'
+                '`/profile` level, coins and record\n' +
+                '`/daily` a free coin bonus, streaks pay more\n' +
+                '`/badges` twenty-eight things to earn\n' +
+                '`/shop` and `/theme` cosmetic card colours\n' +
+                '`/stats` and `/top` the receipts',
+              inline: false
             },
             {
-              name: 'scoring',
+              name: 'for hosts',
               value:
-                'find the truth · **+1000**\n' +
-                'each person who falls for your lie · **+500**\n' +
-                'most likely to · majority takes **+1**'
+                '`/setup` optional round count and pace for this server\n' +
+                '`/invite` the exact invite URL and permission list\n\n' +
+                '**Permissions:** View Channels, Send Messages, Embed Links, Send Messages in Threads. Nothing else. No message history, no member list, no content intent.',
+              inline: false
             },
             {
-              name: 'what it asks for',
+              name: 'how a round works',
               value:
-                'Send Messages and Embed Links in the channels you use.\n' +
-                'No admin, no message history, no privileged intents, no accounts, no API keys, no paid commands.'
+                'press **Join** in the lobby\n' +
+                'the host presses **Start** (a full lobby starts itself)\n' +
+                'answers and votes happen in private replies\n' +
+                'the card updates in place, then shows the next phase',
+              inline: false
             }
           ],
-          footer: 'one game = one message · `/stats` and `/top` keep the receipts',
+          footer: 'free forever · self-host or invite · every game is one message',
           rows: [],
           invite: true
         },

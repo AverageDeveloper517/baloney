@@ -2,13 +2,14 @@ import { SlashCommandBuilder } from 'discord.js';
 
 import { toPayload } from '../ui.js';
 import { safeName } from '../games/base.js';
+import { levelProgress } from '../meta.js';
 
 const percent = (part, whole) => (whole ? Math.round((part / whole) * 100) : 0);
 
 export default {
   data: new SlashCommandBuilder()
     .setName('stats')
-    .setDescription('games played, games won, and how many people fell for your lies')
+    .setDescription('games played, games won, lies told and truths found')
     .addUserOption((option) => option.setName('user').setDescription('look up someone else')),
 
   ephemeral: false,
@@ -25,39 +26,52 @@ export default {
           {
             color: 0x5b6c8f,
             title: `${name} · the record`,
-            description: 'no finished games yet.\n\n`/bluff` is the long game. `/mostlikely` takes two minutes.',
+            description: 'no finished games yet.\n\n`/trivia` takes ninety seconds. `/bluff` is the long game.',
             fields: [],
             footer,
-            rows: []
+            rows: [],
+            invite: true
           },
           { invite }
         )
       );
     }
 
-    const winRate = percent(stats.wins, stats.games);
+    const level = levelProgress(stats.xp);
     const average = (stats.fooled / stats.games).toFixed(1);
+    const accuracy = percent(stats.correct, stats.answers);
+    const kinds = stats.kinds.length ? stats.kinds.join(', ') : 'none recorded';
 
     return interaction.reply(
       toPayload(
         {
           color: 0x3fa796,
           title: `${name} · the record`,
-          description: `${stats.games} game${stats.games === 1 ? '' : 's'} · ${stats.wins} win${stats.wins === 1 ? '' : 's'} · ${winRate}% win rate`,
+          description:
+            `level **${level.level}** · ${stats.games} game${stats.games === 1 ? '' : 's'} · ` +
+            `${stats.wins} win${stats.wins === 1 ? '' : 's'} · ${percent(stats.wins, stats.games)}% win rate`,
           fields: [
             {
               name: 'lying',
-              value: `${stats.fooled} people fooled\n${average} per game\nbest single bluff · ${stats.best} vote${stats.best === 1 ? '' : 's'}`,
+              value:
+                `${stats.fooled} people fooled\n` +
+                `${average} per game\n` +
+                `best single bluff · ${stats.best} vote${stats.best === 1 ? '' : 's'}`,
               inline: true
             },
             {
               name: 'spotting',
-              value: `${stats.found} truth${stats.found === 1 ? '' : 's'} found\n${stats.rounds} rounds played`,
+              value:
+                `${stats.found} truth${stats.found === 1 ? '' : 's'} found\n` +
+                `${stats.correct}/${stats.answers} quiz answers · ${accuracy}%\n` +
+                `${stats.rounds} rounds played`,
               inline: true
-            }
+            },
+            { name: 'games tried', value: kinds, inline: false }
           ],
           footer,
-          rows: []
+          rows: [],
+          invite: true
         },
         { invite }
       )

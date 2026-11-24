@@ -1,18 +1,28 @@
 {
   "name": "baloney",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "A zero-setup Discord party bot. Everyone writes a lie, then everyone votes for the truth.",
+  "description": "Nine zero-setup Discord party games, one message per game, no keys and no paid commands.",
   "license": "MIT",
+  "keywords": [
+    "discord",
+    "discord-bot",
+    "party-games",
+    "trivia",
+    "bluff",
+    "self-hosted"
+  ],
   "engines": {
-    "node": ">=18.17"
+    "node": ">=20"
   },
   "scripts": {
     "start": "node src/index.js",
     "deploy": "node scripts/deploy.js",
     "doctor": "node scripts/doctor.js",
-    "test": "node --test"
+    "check": "node scripts/check.js",
+    "test": "node --test",
+    "test:coverage": "node --test --experimental-test-coverage"
   },
   "dependencies": {
     "discord.js": "^14.28.1"

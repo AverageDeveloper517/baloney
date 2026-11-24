@@ -6,31 +6,34 @@ import {
   TextInputStyle
 } from 'discord.js';
 
-import { BluffGame } from './games/bluff.js';
-import { MostLikelyGame } from './games/mostlikely.js';
+import { GAME_DEFS, createGame, labelOf } from './games/index.js';
+import { PACE, clamp } from './games/base.js';
+import { PartyRun, PARTY_PLAYLISTS } from './party.js';
 import { Session } from './session.js';
 import { toPayload } from './ui.js';
-import { PROMPTS } from './content/prompts.js';
-import { SITUATIONS } from './content/situations.js';
+import { settleGame, settleParty } from './meta.js';
 import { log as defaultLog } from './log.js';
 
 const ephemeral = (content) => ({ content, flags: MessageFlags.Ephemeral });
 
-const GAMES = {
-  bluff: {
-    ns: 'bl',
-    create: (args) => new BluffGame({ prompts: PROMPTS, ...args })
-  },
-  mostlikely: {
-    ns: 'ml',
-    create: (args) => new MostLikelyGame({ situations: SITUATIONS, ...args })
-  }
+const REASONS = {
+  phase: 'that window has closed.',
+  player: 'you are watching this one.',
+  already: 'your answer is already in.',
+  short: 'that is a bit too short.',
+  long: 'that is over the limit. be concise.',
+  range: 'pick a whole number from 1 to 100.',
+  word: 'that is literally your word. try a clue.',
+  voted: 'one vote each. it is locked in.',
+  own: 'that one is yours. pick another.',
+  truth: 'you wrote the real answer, so you sit this vote out.',
+  missing: 'that option is gone.',
+  self: 'you cannot pick yourself. tempting, though.',
+  target: 'that player is not in the game.'
 };
 
-/**
- * Owns every live game. Games are per channel and in memory; the only durable
- * state is the stats file. That keeps the bot honest and the setup trivial.
- */
+const REASON_FALLBACK = 'that did not go through. try again.';
+
 export function createGameService({
   store,
   invite = null,
@@ -41,8 +44,7 @@ export function createGameService({
   const sessions = new Map(); // channelId -> Session
   const userGames = new Map(); // userId -> channelId
 
-  const say = (interaction, content) =>
-    interaction.reply(ephemeral(content)).catch(() => {});
+  const say = (interaction, content) => interaction.reply(ephemeral(content)).catch(() => {});
 
   const nameOf = (interaction) =>
     interaction.member?.displayName ??
@@ -55,29 +57,83 @@ export function createGameService({
     return current && current !== channelId ? current : null;
   }
 
-  async function startGame({ interaction, kind, rounds }) {
-    const meta = GAMES[kind];
-    if (!meta) throw new Error(`unknown game: ${kind}`);
+  function paceFor(guildId) {
+    const settings = store.guildSettings(guildId);
+    return { settings, pace: PACE[settings.pace] ?? 1 };
+  }
+
+  function defaultRounds(def, requested, settings) {
+    const wanted = requested ?? settings.rounds ?? def.rounds;
+    return clamp(Number(wanted) || def.rounds, 1, def.maxRounds ?? 5);
+  }
+
+  function buildParty({ interaction, channelId, guildId, hostId, pace, rounds, playlistKey }) {
+    const chosen = PARTY_PLAYLISTS[playlistKey] ?? PARTY_PLAYLISTS.classic;
+    const playlist = [...chosen.games];
+    const labels = playlist.map((kind) => labelOf(kind));
+
+    const makeGame = (kind) => {
+      const def = GAME_DEFS[kind];
+      return createGame(kind, {
+        channelId,
+        guildId,
+        hostId,
+        clock,
+        pace,
+        rounds: defaultRounds(def, rounds, store.guildSettings(guildId))
+      });
+    };
+
+    return new PartyRun({
+      playlist,
+      labels,
+      rounds,
+      channelId,
+      guildId,
+      hostId,
+      clock,
+      pace,
+      makeGame
+    });
+  }
+
+  async function startGame({ interaction, kind, rounds, pack, playlist }) {
+    if (kind !== 'party' && !GAME_DEFS[kind]) throw new Error(`unknown game: ${kind}`);
 
     const channelId = interaction.channelId;
+    const guildId = interaction.guildId ?? null;
+    const hostId = interaction.user.id;
+
     const existing = sessions.get(channelId);
     if (existing && !existing.ended) {
       return say(interaction, 'a game is already running in this channel. finish it, or start one somewhere else.');
     }
 
-    const other = inOtherChannel(interaction.user.id, channelId);
+    const other = inOtherChannel(hostId, channelId);
     if (other) return say(interaction, `you are already in a game in <#${other}>. one game at a time.`);
 
-    const game = meta.create({
-      channelId,
-      guildId: interaction.guildId ?? null,
-      hostId: interaction.user.id,
-      rounds,
-      clock
-    });
+    const { settings, pace } = paceFor(guildId);
+    let game;
+    let party = null;
 
-    game.add({ id: interaction.user.id, name: nameOf(interaction) });
-    userGames.set(interaction.user.id, channelId);
+    if (kind === 'party') {
+      party = buildParty({ interaction, channelId, guildId, hostId, pace, rounds, playlistKey: playlist });
+      game = party.lobby();
+    } else {
+      const def = GAME_DEFS[kind];
+      game = createGame(kind, {
+        channelId,
+        guildId,
+        hostId,
+        clock,
+        pace,
+        rounds: defaultRounds(def, rounds, settings),
+        pack
+      });
+    }
+
+    game.add({ id: hostId, name: nameOf(interaction) });
+    userGames.set(hostId, channelId);
 
     let message;
     try {
@@ -87,11 +143,12 @@ export function createGameService({
       });
       message = response.resource?.message ?? (await interaction.fetchReply());
     } catch (err) {
-      // The post failed (no permission, expired interaction). Roll the lock back
-      // so the player is not stuck "already in a game" that never existed.
-      if (userGames.get(interaction.user.id) === channelId) userGames.delete(interaction.user.id);
+      // Roll the lock back so a failed post cannot strand the player.
+      if (userGames.get(hostId) === channelId) userGames.delete(hostId);
       throw err;
     }
+
+    game.messageId = message.id;
 
     const session = new Session({
       game,
@@ -100,32 +157,46 @@ export function createGameService({
       timers,
       log: (msg) => log(`[${kind}/${game.id}] ${msg}`),
       update: (payload) => message.edit(payload),
+      planNext: party ? (finished, reason) => party.next(finished, reason) : undefined,
       onEnd: async (finished, reason) => {
-        if (sessions.get(channelId) === session) sessions.delete(channelId);
-        for (const player of finished.players) {
-          if (userGames.get(player.id) === channelId) userGames.delete(player.id);
-        }
-
-        // Only completed games count. A lobby that timed out is not a loss.
         if (reason !== 'done') return;
 
-        const standings = finished.standings();
-        const top = standings[0]?.score ?? 0;
-        const winnerIds = top > 0 ? standings.filter((p) => p.score === top).map((p) => p.id) : [];
+        if (finished.kind === 'party-board') {
+          try {
+            await settleParty({ store, guildId: finished.guildId, players: finished.roster ?? [] });
+          } catch (err) {
+            log(`could not settle the party: ${err.message}`);
+          }
+          return;
+        }
+
+        if (finished.kind === 'party' || finished.kind === 'party-break') return;
+
+        const winnerIds = finished.winners();
+        const totalRounds = Number.isFinite(finished.round) ? finished.round : finished.rounds ?? 1;
 
         try {
-          await store.record({
+          await settleGame({
+            store,
             guildId: finished.guildId,
+            kind: finished.kind,
             players: finished.players,
             winnerIds,
-            rounds: finished.round
+            rounds: totalRounds
           });
         } catch (err) {
           log(`could not save stats: ${err.message}`);
         }
+      },
+      onClose: async () => {
+        if (sessions.get(channelId) === session) sessions.delete(channelId);
+        for (const memberId of session.members) {
+          if (userGames.get(memberId) === channelId) userGames.delete(memberId);
+        }
       }
     });
 
+    session.members = new Set([hostId]);
     sessions.set(channelId, session);
 
     session.arm();
@@ -136,7 +207,7 @@ export function createGameService({
   async function onJoin(interaction, session) {
     const game = session.game;
     if (game.phase !== 'lobby') {
-      return say(interaction, 'the game already started. catch the next one — they run often.');
+      return say(interaction, 'the game already started. catch the next one.');
     }
 
     const other = inOtherChannel(interaction.user.id, interaction.channelId);
@@ -145,13 +216,14 @@ export function createGameService({
     const result = game.add({ id: interaction.user.id, name: nameOf(interaction) });
     if (!result.ok) {
       const reasons = {
-        full: 'this lobby is full. ten is the limit.',
+        full: `this lobby is full. ${game.maxPlayers} is the limit.`,
         already: 'you are already in. press Start when everyone is ready.',
         started: 'the game already started.'
       };
       return say(interaction, reasons[result.reason] ?? 'could not join.');
     }
 
+    session.members.add(interaction.user.id);
     userGames.set(interaction.user.id, interaction.channelId);
     await say(interaction, `you're in · ${result.count}/${game.maxPlayers}`);
 
@@ -171,6 +243,7 @@ export function createGameService({
     }
 
     game.remove(interaction.user.id);
+    session.members.delete(interaction.user.id);
     if (userGames.get(interaction.user.id) === interaction.channelId) userGames.delete(interaction.user.id);
 
     await say(interaction, 'you left the lobby.');
@@ -205,65 +278,98 @@ export function createGameService({
 
   async function onWrite(interaction, session) {
     const game = session.game;
-    if (game.kind !== 'bluff' || !game.prompt) {
-      return say(interaction, 'this game does not take written answers. just vote.');
+    const form = game.writeForm?.();
+    if (!form) return say(interaction, 'this game is all buttons. no typing needed.');
+
+    const modal = new ModalBuilder().setCustomId(form.customId).setTitle(form.title.slice(0, 45));
+
+    for (const input of form.inputs.slice(0, 5)) {
+      const min = clamp(Number(input.min ?? 1), 0, 4_000);
+      const max = clamp(Number(input.max ?? 100), Math.max(1, min), 4_000);
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId(input.id)
+            .setLabel(String(input.label).slice(0, 45))
+            .setPlaceholder(String(input.placeholder ?? '').slice(0, 100))
+            .setStyle(input.paragraph ? TextInputStyle.Paragraph : TextInputStyle.Short)
+            .setMinLength(min)
+            .setMaxLength(max)
+            .setRequired(min > 0)
+        )
+      );
     }
-    if (game.phase !== 'submit') return say(interaction, 'writing is closed for this round.');
-
-    const player = game.get(interaction.user.id);
-    if (!player) return say(interaction, 'you are watching this one. run `/bluff` to host your own.');
-    if (game.submissions.has(interaction.user.id)) return say(interaction, 'your answer is already in. sit tight.');
-
-    const modal = new ModalBuilder().setCustomId(`blm:${game.id}`).setTitle('your lie');
-    modal.addComponents(
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId('lie')
-          .setLabel(`Fill the blank: ${String(game.prompt.prompt).replace(/_{2,}/g, '____')}`.slice(0, 45))
-          .setPlaceholder('make it sound true')
-          .setStyle(TextInputStyle.Short)
-          .setMinLength(2)
-          .setMaxLength(80)
-          .setRequired(true)
-      )
-    );
 
     await interaction.showModal(modal).catch((err) => log(`modal failed: ${err.message}`));
   }
 
-  async function onVote(interaction, session, key) {
-    const game = session.game;
+  function readFields(interaction, form) {
+    const values = {};
+    for (const input of form.inputs) {
+      try {
+        values[input.id] = interaction.fields.getTextInputValue(input.id);
+      } catch {
+        values[input.id] = '';
+      }
+    }
+    return values;
+  }
 
-    if (game.kind === 'bluff') {
-      const result = game.vote(interaction.user.id, key);
-      if (!result.ok) {
-        const reasons = {
-          own: 'that one is your lie. pick another.',
-          voted: 'one vote each. it is locked in.',
-          truth: 'you wrote the real answer, so you sit this vote out.',
-          phase: 'voting is closed.',
-          player: 'you are watching this one.',
-          missing: 'that option is gone.'
-        };
-        return say(interaction, reasons[result.reason] ?? 'could not record that vote.');
-      }
-      await say(interaction, `vote locked · ${key}`);
+  async function onModal(interaction, session) {
+    const game = session.game;
+    const form = game.writeForm?.();
+    if (!form) return say(interaction, 'that window has closed. nothing was submitted.');
+
+    const values = readFields(interaction, form);
+    const result = game.submit(interaction.user.id, values);
+
+    if (!result.ok) return say(interaction, REASONS[result.reason] ?? REASON_FALLBACK);
+
+    if (result.truth) {
+      await say(interaction, "that's the real answer. you sit this vote out — you already know it.");
+    } else if (result.merged) {
+      await say(interaction, `someone wrote the same thing. you're sharing **${result.text}**.`);
+    } else if (result.value !== undefined) {
+      await say(interaction, `locked in · ${result.value}`);
     } else {
-      const result = game.vote(interaction.user.id, key);
-      if (!result.ok) {
-        const reasons = {
-          self: 'you cannot vote for yourself. tempting, though.',
-          voted: 'one vote each. it is locked in.',
-          phase: 'voting is closed.',
-          player: 'you are watching this one.',
-          target: 'that player is not in the game.'
-        };
-        return say(interaction, reasons[result.reason] ?? 'could not record that vote.');
-      }
-      const target = game.get(key);
-      await say(interaction, `vote locked · ${target?.name ?? 'player'}`);
+      const total = game.active().length;
+      const done = progressOf(game);
+      await say(interaction, `locked in · ${done}/${total}`);
     }
 
+    await session.refresh();
+  }
+
+  /** How many players have handed something in, whatever the game calls it. */
+  function progressOf(game) {
+    if (typeof game.submittedCount === 'function') return game.submittedCount();
+    for (const key of ['answers', 'guesses', 'clues', 'lines', 'submissions']) {
+      if (game[key] instanceof Map) return game[key].size;
+    }
+    return 0;
+  }
+
+  async function onVote(interaction, session, key) {
+    const game = session.game;
+    const result = game.vote(interaction.user.id, key);
+
+    if (!result.ok) return say(interaction, REASONS[result.reason] ?? REASON_FALLBACK);
+
+    const label = game.voteLabel?.(key) ?? game.get?.(key)?.name ?? String(key).toUpperCase();
+    await say(interaction, `vote locked · ${label}`);
+    await session.refresh();
+  }
+
+  async function onWord(interaction, session) {
+    const game = session.game;
+    const word = game.secret?.(interaction.user.id);
+
+    if (!word) return say(interaction, 'you are not in this round.');
+    if (game.phase === 'lobby') return say(interaction, 'the game has not started yet.');
+
+    game.markSeen?.(interaction.user.id);
+    await say(interaction, `your word: **${word}**\n\nkeep it to yourself. write a clue, not the word.`);
     await session.refresh();
   }
 
@@ -272,11 +378,14 @@ export function createGameService({
     const session = sessions.get(interaction.channelId);
 
     if (!session || session.ended || session.id !== id) {
-      return say(interaction, 'that game has ended. `/bluff` or `/mostlikely` starts a new one.');
+      return say(interaction, 'that game has ended. `/help` lists the games.');
     }
 
-    if (session.game.kind === 'bluff' && ns !== 'bl') return say(interaction, 'wrong game for that button.');
-    if (session.game.kind === 'mostlikely' && ns !== 'ml') return say(interaction, 'wrong game for that button.');
+    const kind = session.game.kind;
+    const def = GAME_DEFS[kind];
+    if (kind !== 'party' && def && def.ns !== ns) {
+      return say(interaction, 'wrong game for that button.');
+    }
 
     switch (action) {
       case 'join':
@@ -289,6 +398,8 @@ export function createGameService({
         return onCancel(interaction, session);
       case 'write':
         return onWrite(interaction, session);
+      case 'word':
+        return onWord(interaction, session);
       case 'v':
         return onVote(interaction, session, key);
       default:
@@ -298,37 +409,14 @@ export function createGameService({
 
   async function handleModal(interaction) {
     const [ns, id] = interaction.customId.split(':');
-    if (ns !== 'blm') return;
+    if (ns !== 'gm') return;
 
     const session = sessions.get(interaction.channelId);
-    if (!session || session.ended || session.id !== id || session.game.kind !== 'bluff') {
+    if (!session || session.ended || session.id !== id) {
       return say(interaction, 'that round has ended. nothing was submitted.');
     }
 
-    const text = interaction.fields.getTextInputValue('lie');
-    const result = session.game.submit(interaction.user.id, text);
-
-    if (!result.ok) {
-      const reasons = {
-        phase: 'the round moved on. your answer did not count.',
-        player: 'you are watching this one.',
-        already: 'your answer is already in.',
-        short: 'give it at least two characters.',
-        long: '80 characters is the ceiling. be concise, liar.'
-      };
-      return say(interaction, reasons[result.reason] ?? 'could not save that.');
-    }
-
-    if (result.truth) {
-      await say(interaction, "that's the real answer. you sit this vote out — you already know it.");
-    } else if (result.merged) {
-      await say(interaction, `someone wrote the same thing. you're sharing **${result.text}**.`);
-    } else {
-      const total = session.game.active().length;
-      await say(interaction, `locked in · ${session.game.submittedCount()}/${total}`);
-    }
-
-    await session.refresh();
+    return onModal(interaction, session);
   }
 
   function activeIn(channelId) {
@@ -359,6 +447,7 @@ export function createGameService({
     handleModal,
     activeIn,
     sweep,
+    labelOf,
     close: async () => {
       for (const session of sessions.values()) await session.finish('shutdown');
       sessions.clear();

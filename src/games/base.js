@@ -6,14 +6,17 @@
 
 export const COLORS = {
   lobby: 0xf2b544,
-  submit: 0x5b6c8f,
+  play: 0x5b6c8f,
   vote: 0xe4572e,
   reveal: 0x3fa796,
   final: 0xf2b544,
-  closed: 0x8d99ae
+  closed: 0x8d99ae,
+  party: 0x9b5de5
 };
 
 export const LETTERS = 'ABCDEFGHIJK'.split('');
+
+export const PACE = { fast: 0.65, standard: 1, relaxed: 1.4 };
 
 export const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
@@ -35,6 +38,11 @@ export function normalize(value) {
     .replace(/[^\p{L}\p{N} ]/gu, '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/** Letters and digits only. Used when comparing short answers. */
+export function squish(value) {
+  return clean(value).toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 }
 
 /**
@@ -61,6 +69,10 @@ export function shuffle(list, rng = Math.random) {
     [out[i], out[j]] = [out[j], out[i]];
   }
   return out;
+}
+
+export function pickOne(list, rng = Math.random) {
+  return list[Math.floor(rng() * list.length)];
 }
 
 export function pickMany(list, count, rng = Math.random) {
@@ -104,6 +116,25 @@ export function scoreLines(players, { limit = 10, unit = '' } = {}) {
     .join('\n');
 }
 
+/** One button per option, split into rows of five. */
+export function optionRows({ ns, id, options, style = 'secondary' }) {
+  const rows = [];
+  for (let i = 0; i < options.length; i += 5) {
+    rows.push(
+      options.slice(i, i + 5).map((option) => ({
+        id: `${ns}:${id}:v:${option.value}`,
+        label: option.label,
+        style: option.style ?? style,
+        disabled: Boolean(option.disabled)
+      }))
+    );
+  }
+  return rows;
+}
+
+/** "3 players", "1 player". */
+export const plural = (count, word, ending = 's') => `${count} ${word}${count === 1 ? '' : ending}`;
+
 /**
  * A lobby is the state every game shares: a host, a guest list, a phase and a
  * deadline. Subclasses add rounds on top.
@@ -117,21 +148,35 @@ export class Lobby {
     minPlayers = 3,
     maxPlayers = 10,
     lobbyMs = 5 * 60_000,
-    clock = Date.now
+    pace = 1,
+    clock = Date.now,
+    ns = 'bl',
+    label = 'this game',
+    blurb = 'press join and the host starts when everyone is in.'
   }) {
     this.id = id;
     this.channelId = channelId;
     this.guildId = guildId;
     this.hostId = hostId;
+    this.ns = ns;
+    this.label = label;
+    this.blurb = blurb;
     this.minPlayers = minPlayers;
     this.maxPlayers = maxPlayers;
     this.clock = clock;
+    this.pace = Number.isFinite(Number(pace)) && Number(pace) > 0 ? Number(pace) : 1;
 
     this.players = [];
     this.phase = 'lobby';
-    this.phaseEndsAt = clock() + lobbyMs;
+    this.phaseEndsAt = clock() + this.ms(lobbyMs);
     this.createdAt = clock();
     this.messageId = null;
+    this.flags = new Set();
+  }
+
+  /** Scale a base duration by the server's pace setting. */
+  ms(base) {
+    return Math.round(base * this.pace);
   }
 
   get size() {
@@ -158,13 +203,17 @@ export class Lobby {
     return this.get(this.hostId);
   }
 
+  get closed() {
+    return this.phase === 'done' || this.phase === 'dead';
+  }
+
   /** Returns a machine-readable reason so the router can write the reply. */
   add({ id, name }) {
     if (this.phase !== 'lobby') return { ok: false, reason: 'started' };
     if (this.has(id)) return { ok: false, reason: 'already' };
     if (this.full) return { ok: false, reason: 'full' };
 
-    this.players.push({ id, name: safeName(name), score: 0, left: false });
+    this.players.push({ id, name: safeName(name), score: 0, left: false, flags: new Set() });
     return { ok: true, count: this.players.length };
   }
 
@@ -191,10 +240,6 @@ export class Lobby {
     return true;
   }
 
-  get closed() {
-    return this.phase === 'done' || this.phase === 'dead';
-  }
-
   /** Base card for a lobby that timed out or was cancelled. */
   closedView(title, description) {
     return {
@@ -202,8 +247,213 @@ export class Lobby {
       title,
       description,
       fields: [],
-      footer: '/bluff or /mostlikely for a fresh one',
+      footer: 'the party continues with /help',
       rows: []
     };
+  }
+
+  /**
+   * Default lobby card. Games with more flavour can override it, but every game
+   * needs a lobby screen that is safe to render before it starts.
+   */
+  lobbyView() {
+    const host = this.host?.name ?? 'nobody';
+    const names = this.players.length
+      ? this.players
+          .map((player) => (player.id === this.hostId ? `**${player.name}** · host` : player.name))
+          .join('\n')
+      : 'nobody yet';
+
+    const rows = [
+      [
+        { id: `${this.ns}:${this.id}:join`, label: 'Join', style: 'primary' },
+        { id: `${this.ns}:${this.id}:leave`, label: 'Leave', style: 'secondary' }
+      ],
+      [
+        { id: `${this.ns}:${this.id}:start`, label: 'Start', style: 'success' },
+        { id: `${this.ns}:${this.id}:cancel`, label: 'Cancel', style: 'danger' }
+      ]
+    ];
+
+    return {
+      color: COLORS.lobby,
+      title: `${this.label} · lobby`,
+      description:
+        `**${this.blurb}**\n\n` +
+        `the host is **${host}**. ${plural(this.minPlayers, 'player')} to start, ${this.maxPlayers} max.\n\n${names}`,
+      fields: [{ name: 'players', value: `${this.size}/${this.minPlayers} minimum`, inline: false }],
+      footer: 'one game, one message · press Join, then the host presses Start',
+      rows
+    };
+  }
+
+  /** Players sorted by score, then by tie-breakers the game cares about. */
+  standings() {
+    return [...this.players].sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+  }
+
+  /** Player ids that share the top score, ignoring zero-score games. */
+  winners() {
+    const standings = this.standings();
+    const top = standings[0]?.score ?? 0;
+    return top > 0 ? standings.filter((player) => player.score === top).map((player) => player.id) : [];
+  }
+
+  /** Per-game flavour line for the final card. */
+  finalLine() {
+    const winners = this.standings().filter((player) => this.winners().includes(player.id));
+    return winners.length
+      ? winners.length === 1
+        ? `**${winners[0].name}** takes it with ${winners[0].score}.`
+        : `${winners.map((player) => `**${player.name}**`).join(' and ')} tie on ${winners[0].score}.`
+      : 'nobody scored. remarkable.';
+  }
+
+  /** Extra final-card field, if the game has one. */
+  awards() {
+    return '';
+  }
+
+  /** Consumed by the meta layer: what this game contributed per player. */
+  results() {
+    return this.players.map((player) => ({
+      id: player.id,
+      name: player.name,
+      score: player.score,
+      flags: [...(player.flags ?? [])],
+      counters: player.counters ?? {}
+    }));
+  }
+
+  finalView() {
+    const awards = this.awards();
+    const fields = [{ name: 'final', value: scoreLines(this.standings(), { limit: 10 }) || 'no points', inline: false }];
+    if (awards) fields.push({ name: 'awards', value: awards, inline: false });
+
+    return {
+      color: COLORS.final,
+      title: 'the standings',
+      description: `${this.finalLine()}\n\n${this.rounds ?? 1} round${(this.rounds ?? 1) === 1 ? '' : 's'}, ${plural(this.players.length, 'player')}.`,
+      fields,
+      footer: 'one game, one message · /party runs the whole night',
+      rows: [],
+      invite: true
+    };
+  }
+}
+
+/**
+ * A game made of identical rounds where each round has one action phase and one
+ * reveal. Trivia, would-you-rather and the number game all fit this shape.
+ */
+export class RoundGame extends Lobby {
+  constructor({
+    rounds = 3,
+    playMs = 30_000,
+    revealMs = 7_000,
+    lobbyMs = 3 * 60_000,
+    ...rest
+  }) {
+    super({ ...rest, lobbyMs });
+    this.rounds = clamp(Number(rounds) || 3, 1, 6);
+    this.playMs = playMs;
+    this.revealMs = revealMs;
+    this.round = 0;
+    this.reveal = null;
+    this.history = [];
+  }
+
+  start() {
+    if (this.phase !== 'lobby') return { ok: false, reason: 'phase' };
+    if (this.size < this.minPlayers) return { ok: false, reason: 'few' };
+    this.begin();
+    return { ok: true };
+  }
+
+  begin() {
+    this.round += 1;
+    this.reveal = null;
+    this.beginRound();
+    this.phase = 'play';
+    this.phaseEndsAt = this.clock() + this.ms(this.playMs);
+  }
+
+  /** Subclasses reset their round state here. */
+  beginRound() {}
+
+  /** True when every active player has acted, so the phase can close early. */
+  allActed() {
+    return this.players.every((player) => player.left || this.hasActed(player.id));
+  }
+
+  hasActed() {
+    return false;
+  }
+
+  tick(now = this.clock()) {
+    switch (this.phase) {
+      case 'lobby':
+        this.phase = 'dead';
+        this.phaseEndsAt = null;
+        return true;
+      case 'play':
+        this.resolve(now);
+        return true;
+      case 'reveal':
+        return this.nextRound();
+      default:
+        return false;
+    }
+  }
+
+  advanceIfReady(now = this.clock()) {
+    if (this.phase === 'play' && this.allActed()) return this.resolve(now);
+    return false;
+  }
+
+  resolve(now = this.clock()) {
+    if (this.phase !== 'play') return false;
+    this.scoreRound();
+    this.phase = 'reveal';
+    this.phaseEndsAt = now + this.ms(this.revealMs);
+    this.history.push(this.reveal);
+    return true;
+  }
+
+  /** Subclasses compute scores, flags and this.reveal here. */
+  scoreRound() {}
+
+  nextRound() {
+    if (this.phase !== 'reveal') return false;
+    if (this.round >= this.rounds) {
+      this.finishUp();
+      return true;
+    }
+    this.begin();
+    return true;
+  }
+
+  /** Called once, after the last reveal. */
+  finishUp() {
+    this.phase = 'done';
+    this.phaseEndsAt = null;
+  }
+
+  view() {
+    if (this.phase === 'lobby') return this.lobbyView();
+    if (this.phase === 'dead') {
+      return this.closedView('nobody started', 'the lobby timed out before enough players joined.');
+    }
+    if (this.phase === 'done') return this.finalView();
+
+    return this.phase === 'reveal' ? this.revealView() : this.playView();
+  }
+
+  playView() {
+    return this.closedView('nothing to show', 'this game has no action screen.');
+  }
+
+  revealView() {
+    return this.closedView('round over', 'this game has no reveal screen.');
   }
 }

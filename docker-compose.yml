@@ -1,0 +1,13 @@
+services:
+  baloney:
+    build: .
+    image: baloney:2
+    container_name: baloney
+    env_file:
+      - .env
+    environment:
+      DATA_FILE: /app/data/stats.json
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    init: true

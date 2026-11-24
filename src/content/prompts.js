@@ -416,3 +416,26 @@ export const PROMPTS = [
 ];
 
 export const PROMPT_COUNT = PROMPTS.length;
+
+/**
+ * Themed packs for /bluff. Every prompt belongs to exactly one pack, so the
+ * packs are disjoint and together cover the whole bank.
+ */
+export const PACKS = {
+  animals: ['p01', 'p02', 'p06', 'p10', 'p11', 'p13', 'p14', 'p30', 'p31', 'p33', 'p34', 'p45', 'p46', 'p56', 'p61', 'p62', 'p63', 'p64'],
+  food: ['p03', 'p07', 'p15', 'p16', 'p19', 'p42', 'p52', 'p57'],
+  science: ['p08', 'p20', 'p21', 'p35', 'p36', 'p37', 'p43', 'p44', 'p47', 'p48', 'p58', 'p59', 'p60'],
+  tech: ['p26', 'p32', 'p38', 'p39', 'p40', 'p65', 'p66', 'p67', 'p68'],
+  words: ['p12', 'p18', 'p22', 'p41', 'p49', 'p50', 'p51', 'p53', 'p54', 'p55'],
+  history: ['p04', 'p05', 'p09', 'p17', 'p23', 'p24', 'p25', 'p27', 'p28', 'p29']
+};
+
+export const PACK_NAMES = Object.keys(PACKS);
+
+export function promptsForPack(pack) {
+  if (!pack || pack === 'all') return PROMPTS;
+  const ids = PACKS[pack];
+  if (!ids) return PROMPTS;
+  const wanted = new Set(ids);
+  return PROMPTS.filter((prompt) => wanted.has(prompt.id));
+}

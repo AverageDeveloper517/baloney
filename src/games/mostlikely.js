@@ -44,7 +44,7 @@ export class MostLikelyGame extends Lobby {
     this.votes = new Map();
     this.reveal = null;
     this.phase = 'vote';
-    this.phaseEndsAt = this.clock() + ML_TIMING.vote;
+    this.phaseEndsAt = this.clock() + this.ms(ML_TIMING.vote);
   }
 
   tick(now = this.clock()) {
@@ -100,7 +100,10 @@ export class MostLikelyGame extends Lobby {
 
     const high = Math.max(0, ...counts.values());
     const winners = high > 0 ? this.players.filter((player) => counts.get(player.id) === high) : [];
-    for (const winner of winners) winner.score += 1;
+    for (const winner of winners) {
+      winner.score += 1;
+      winner.flags.add('favourite');
+    }
 
     this.reveal = {
       round: this.round,
@@ -114,7 +117,7 @@ export class MostLikelyGame extends Lobby {
 
     this.history.push(this.reveal);
     this.phase = 'reveal';
-    this.phaseEndsAt = now + ML_TIMING.reveal;
+    this.phaseEndsAt = now + this.ms(ML_TIMING.reveal);
     return true;
   }
 

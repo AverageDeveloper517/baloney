@@ -2,51 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createGameService } from '../src/game-service.js';
-
-function fake({ id = 'u1', channelId = 'c1', customId = null, lie = 'a lie', integers = {} } = {}) {
-  const replies = [];
-  const edits = [];
-  const modals = [];
-  let deferred = false;
-
-  const message = {
-    edit: async (payload) => {
-      edits.push(payload);
-    }
-  };
-
-  const interaction = {
-    user: { id, username: id, globalName: id },
-    member: { displayName: id },
-    channelId,
-    guildId: 'g1',
-    customId,
-    options: {
-      getInteger: (name) => integers[name] ?? null,
-      getString: () => null,
-      getUser: () => null
-    },
-    fields: { getTextInputValue: () => lie },
-    reply: async (payload) => {
-      replies.push(payload);
-      return { resource: { message } };
-    },
-    fetchReply: async () => message,
-    deferUpdate: async () => {
-      deferred = true;
-    },
-    showModal: async (modal) => {
-      modals.push(modal);
-    },
-    isRepliable: () => true,
-    replied: false,
-    get deferred() {
-      return deferred;
-    }
-  };
-
-  return { interaction, replies, edits, modals, isDeferred: () => deferred };
-}
+import { INVITE, memoryStore, fake } from '../test-support/helpers.js';
 
 function rig() {
   let now = 10_000;
@@ -54,26 +10,22 @@ function rig() {
     set: (fn, ms) => ({ fn, ms }),
     clear: () => {}
   };
-  const records = [];
-
-  const store = {
-    record: async (payload) => {
-      records.push(payload);
-    },
-    get: () => ({ games: 0 }),
-    top: () => []
-  };
+  const logs = [];
+  const store = memoryStore();
 
   const service = createGameService({
     store,
+    invite: INVITE,
     clock: () => now,
     timers,
-    log: () => {}
+    log: (message) => logs.push(message)
   });
 
   return {
     service,
-    records,
+    store,
+    logs,
+    now: () => now,
     setNow: (value) => {
       now = value;
     }
@@ -87,30 +39,35 @@ async function startBluff(r, hostId = 'u1') {
   return { host, session, game: session.game };
 }
 
+async function click(r, game, id, action) {
+  const press = fake({ id, customId: `bl:${game.id}:${action}` });
+  await r.service.handleButton(press.interaction);
+  return press;
+}
+
 async function join(r, game, id) {
-  const click = fake({ id, customId: `bl:${game.id}:join` });
-  await r.service.handleButton(click.interaction);
-  return click;
+  const press = fake({ id, customId: `bl:${game.id}:join` });
+  await r.service.handleButton(press.interaction);
+  return press;
 }
 
 async function startRound(r, game) {
-  const click = fake({ id: game.hostId, customId: `bl:${game.id}:start` });
-  await r.service.handleButton(click.interaction);
+  const press = fake({ id: game.hostId, customId: `bl:${game.id}:start` });
+  await r.service.handleButton(press.interaction);
   assert.equal(game.phase, 'submit');
-  return click;
 }
 
 async function submit(r, game, id, lie) {
   const write = fake({ id, customId: `bl:${game.id}:write` });
   await r.service.handleButton(write.interaction);
-  assert.equal(write.modals.length, 1, 'the write button opens a modal');
+  assert.equal(write.modalShows.length, 1, 'the write button opens a modal');
 
-  const modal = fake({ id, customId: `blm:${game.id}`, lie });
-  await r.service.handleModal(modal.interaction);
-  return { write, modal };
+  const send = fake({ id, customId: `gm:${game.id}`, values: { lie } });
+  await r.service.handleModal(send.interaction);
+  return { write, send };
 }
 
-test('a complete game runs through buttons, a modal and the timer', async () => {
+test('a complete bluff game runs through buttons, a modal and the timer', async () => {
   const r = rig();
   const { host, session, game } = await startBluff(r);
 
@@ -124,10 +81,10 @@ test('a complete game runs through buttons, a modal and the timer', async () => 
   assert.ok(host.edits.length >= 2, 'the lobby card was edited in place, not spammed');
 
   await startRound(r, game);
-
   await submit(r, game, 'u1', 'a lie from one');
   await submit(r, game, 'u2', 'a lie from two');
   await submit(r, game, 'u3', 'a lie from three');
+
   assert.equal(game.phase, 'vote', 'the last answer closes the write window');
 
   const truth = game.options.find((option) => option.truth).key;
@@ -143,9 +100,13 @@ test('a complete game runs through buttons, a modal and the timer', async () => 
 
   assert.equal(game.phase, 'done');
   assert.equal(r.service.sessions.has('c1'), false, 'the channel is free again');
-  assert.equal(r.records.length, 1);
-  assert.equal(r.records[0].rounds, 1);
-  assert.deepEqual(r.records[0].winnerIds.sort(), ['u1', 'u2', 'u3'], 'a three-way tie is a three-way win');
+  assert.equal(r.service.userGames.has('u1'), false, 'the player is not locked to anything');
+
+  const one = r.store.get('g1', 'u1');
+  assert.equal(one.games, 1);
+  assert.equal(one.wins, 1, 'a three-way tie is a three-way win');
+  assert.equal(one.kinds[0], 'bluff');
+  assert.ok(one.xp > 0 && one.coins > 0);
 });
 
 test('one game per channel and one game per player', async () => {
@@ -180,6 +141,11 @@ test('only the host can start or cancel', async () => {
   await r.service.handleButton(cancel.interaction);
   assert.match(cancel.replies[0].content, /only the host/);
   assert.equal(game.phase, 'lobby');
+
+  const hostCancel = fake({ id: 'u1', customId: `bl:${game.id}:cancel` });
+  await r.service.handleButton(hostCancel.interaction);
+  assert.equal(r.service.activeIn('c1'), null, 'a cancelled lobby frees the channel');
+  assert.equal(r.store.get('g1', 'u1').games, 0, 'a cancelled lobby records nothing');
 });
 
 test('you cannot vote for your own lie through the button either', async () => {
@@ -194,10 +160,10 @@ test('you cannot vote for your own lie through the button either', async () => {
   await submit(r, game, 'u3', 'a third lie');
 
   const own = game.options.find((option) => option.authors.includes('u1')).key;
-  const click = fake({ id: 'u1', customId: `bl:${game.id}:v:${own}` });
-  await r.service.handleButton(click.interaction);
+  const vote = fake({ id: 'u1', customId: `bl:${game.id}:v:${own}` });
+  await r.service.handleButton(vote.interaction);
 
-  assert.match(click.replies[0].content, /your lie/);
+  assert.match(vote.replies[0].content, /yours/);
   assert.equal(game.votes.has('u1'), false);
 });
 
@@ -208,8 +174,8 @@ test('a full lobby starts itself and an old button is refused', async () => {
   const game = r.service.activeIn('c1').game;
 
   for (let i = 2; i <= 10; i += 1) {
-    const click = fake({ id: `u${i}`, customId: `ml:${game.id}:join` });
-    await r.service.handleButton(click.interaction);
+    const press = fake({ id: `u${i}`, customId: `ml:${game.id}:join` });
+    await r.service.handleButton(press.interaction);
   }
 
   assert.equal(game.size, 10);
@@ -222,10 +188,7 @@ test('a full lobby starts itself and an old button is refused', async () => {
 
 test('a failed post does not leave the host locked out of every channel', async () => {
   const r = rig();
-  const host = fake({ id: 'u1' });
-  host.interaction.reply = async () => {
-    throw new Error('Missing Permissions');
-  };
+  const host = fake({ id: 'u1', failReply: 'Missing Permissions' });
 
   await assert.rejects(
     r.service.startGame({ interaction: host.interaction, kind: 'bluff', rounds: 1 }),
@@ -235,13 +198,12 @@ test('a failed post does not leave the host locked out of every channel', async 
   assert.equal(r.service.sessions.size, 0, 'no half-built game is kept');
   assert.equal(r.service.userGames.has('u1'), false, 'the player is free to try elsewhere');
 
-  // And the same channel is usable once the host retries somewhere that works.
   const retry = fake({ id: 'u1', channelId: 'c2' });
   await r.service.startGame({ interaction: retry.interaction, kind: 'bluff', rounds: 1 });
   assert.equal(r.service.activeIn('c2').game.hostId, 'u1');
 });
 
-test('a forged write button cannot crash a most likely game', async () => {
+test('a forged write button cannot crash a button-only game', async () => {
   const r = rig();
   const host = fake({ id: 'u1' });
   await r.service.startGame({ interaction: host.interaction, kind: 'mostlikely', rounds: 1 });
@@ -250,5 +212,210 @@ test('a forged write button cannot crash a most likely game', async () => {
   const forged = fake({ id: 'u1', customId: `ml:${game.id}:write` });
   await r.service.handleButton(forged.interaction);
 
-  assert.match(forged.replies[0].content, /does not take written answers/);
+  assert.match(forged.replies[0].content, /buttons/);
+});
+
+test('a trivia game routes buttons, awards points and stores the quiz record', async () => {
+  const r = rig();
+  const host = fake({ id: 'u1' });
+  await r.service.startGame({ interaction: host.interaction, kind: 'trivia', rounds: 1 });
+  const session = r.service.activeIn('c1');
+  const game = session.game;
+
+  for (const id of ['u2', 'u3']) {
+    const press = fake({ id, customId: `tr:${game.id}:join` });
+    await r.service.handleButton(press.interaction);
+  }
+
+  const start = fake({ id: 'u1', customId: `tr:${game.id}:start` });
+  await r.service.handleButton(start.interaction);
+  assert.equal(game.phase, 'play');
+
+  const correct = game.correctIndex;
+  for (const [id, choice] of [
+    ['u1', correct],
+    ['u2', correct],
+    ['u3', (correct + 1) % 4]
+  ]) {
+    const vote = fake({ id, customId: `tr:${game.id}:v:${choice}` });
+    await r.service.handleButton(vote.interaction);
+    assert.match(vote.replies[0].content, /vote locked · [A-D]/);
+  }
+
+  assert.equal(game.phase, 'reveal');
+  r.setNow(game.phaseEndsAt);
+  await session.onTimer();
+  assert.equal(session.ended, true);
+
+  assert.equal(r.store.get('g1', 'u1').correct, 1);
+  assert.equal(r.store.get('g1', 'u3').correct, 0);
+  assert.equal(r.store.get('g1', 'u1').answers, 1);
+  assert.ok(r.store.get('g1', 'u1').xp > r.store.get('g1', 'u3').xp);
+});
+
+test('an impostor game hands words out privately and reaches the reveal', async () => {
+  const r = rig();
+  const host = fake({ id: 'u1' });
+  await r.service.startGame({ interaction: host.interaction, kind: 'impostor', rounds: 1 });
+  const session = r.service.activeIn('c1');
+  const game = session.game;
+
+  for (const id of ['u2', 'u3']) {
+    const press = fake({ id, customId: `im:${game.id}:join` });
+    await r.service.handleButton(press.interaction);
+  }
+  const start = fake({ id: 'u1', customId: `im:${game.id}:start` });
+  await r.service.handleButton(start.interaction);
+  assert.equal(game.phase, 'brief');
+
+  for (const id of ['u1', 'u2', 'u3']) {
+    const word = fake({ id, customId: `im:${game.id}:word` });
+    await r.service.handleButton(word.interaction);
+    assert.match(word.replies[0].content, /your word: \*\*/);
+  }
+  assert.equal(game.phase, 'clue', 'every word opened hands over to the clue phase');
+
+  for (const id of ['u1', 'u2', 'u3']) {
+    const write = fake({ id, customId: `im:${game.id}:write` });
+    await r.service.handleButton(write.interaction);
+    const send = fake({ id, customId: `gm:${game.id}`, values: { clue: `clue ${id}` } });
+    await r.service.handleModal(send.interaction);
+    assert.match(send.replies[0].content, /locked in · \d\/3/);
+  }
+  assert.equal(game.phase, 'vote');
+
+  const impostor = game.impostorId;
+  const fallback = ['u1', 'u2', 'u3'].find((id) => id !== impostor);
+  for (const id of ['u1', 'u2', 'u3']) {
+    const vote = fake({ id, customId: `im:${game.id}:v:${id === impostor ? fallback : impostor}` });
+    await r.service.handleButton(vote.interaction);
+  }
+  assert.equal(game.phase, 'reveal');
+  assert.equal(game.reveal.caught, true);
+
+  r.setNow(game.phaseEndsAt);
+  await session.onTimer();
+  assert.equal(session.ended, true);
+  assert.ok(r.store.get('g1', 'u1').games === 1);
+});
+
+test('party night chains games, pays party points and settles on the board', async () => {
+  const r = rig();
+  const host = fake({ id: 'u1' });
+  await r.service.startGame({ interaction: host.interaction, kind: 'party', playlist: 'quick', rounds: 1 });
+  const session = r.service.activeIn('c1');
+  const lobby = session.game;
+
+  for (const id of ['u2', 'u3']) {
+    const press = fake({ id, customId: `pt:${lobby.id}:join` });
+    await r.service.handleButton(press.interaction);
+  }
+  const start = fake({ id: 'u1', customId: `pt:${lobby.id}:start` });
+  await r.service.handleButton(start.interaction);
+
+  assert.equal(session.game.kind, 'trivia', 'the lobby hands over to the first game');
+  assert.equal(r.store.size, 0, 'the lobby itself settles nothing');
+
+  let game = session.game;
+  game.vote('u1', String(game.correctIndex));
+  game.vote('u2', String((game.correctIndex + 1) % 4));
+  game.vote('u3', String((game.correctIndex + 2) % 4));
+  await session.refresh();
+  r.setNow(game.phaseEndsAt);
+  await session.onTimer();
+  assert.equal(session.game.kind, 'party-break');
+
+  const breakCard = session.game;
+  r.setNow(breakCard.phaseEndsAt);
+  await session.onTimer();
+  assert.equal(session.game.kind, 'wyr');
+
+  game = session.game;
+  game.vote('u1', 'a');
+  game.vote('u2', 'a');
+  game.vote('u3', 'b');
+  await session.refresh();
+  r.setNow(game.phaseEndsAt);
+  await session.onTimer();
+  assert.equal(session.game.kind, 'party-break');
+
+  const secondBreak = session.game;
+  r.setNow(secondBreak.phaseEndsAt);
+  await session.onTimer();
+  assert.equal(session.game.kind, 'number');
+
+  game = session.game;
+  for (const [index, id] of ['u1', 'u2', 'u3'].entries()) {
+    game.submit(id, { number: String(30 + index) });
+  }
+  await session.refresh();
+  r.setNow(game.phaseEndsAt);
+  await session.onTimer();
+
+  assert.equal(session.ended, true);
+
+  const one = r.store.get('g1', 'u1');
+  assert.equal(one.games, 3, 'trivia, would you rather and number all count');
+  assert.ok(one.kinds.includes('trivia'));
+  assert.ok(one.kinds.includes('wyr'));
+  assert.ok(one.kinds.includes('number'));
+  assert.ok(one.kinds.includes('party'));
+  assert.ok(one.badges.includes('party-animal'));
+});
+
+test('the sweep frees sessions that outlive the safety window', async () => {
+  const r = rig();
+  const { session } = await startBluff(r);
+
+  r.setNow(r.now() + 4 * 60 * 60_000);
+  r.service.sweep();
+
+  assert.equal(session.ended, true);
+  assert.equal(r.service.sessions.has('c1'), false);
+});
+
+test('shutdown closes every session exactly once', async () => {
+  const r = rig();
+  const one = await startBluff(r);
+  const other = fake({ id: 'u9', channelId: 'c2' });
+  await r.service.startGame({ interaction: other.interaction, kind: 'mostlikely', rounds: 1 });
+  const two = r.service.activeIn('c2');
+
+  await r.service.close();
+  assert.equal(one.session.ended, true);
+  assert.equal(two.ended, true);
+  assert.equal(r.service.sessions.size, 0);
+  assert.equal(r.service.userGames.size, 0);
+});
+
+test('an unknown game is a programming error, not a Discord reply', async () => {
+  const r = rig();
+  const host = fake({ id: 'u1' });
+
+  await assert.rejects(
+    r.service.startGame({ interaction: host.interaction, kind: 'mystery' }),
+    /unknown game/
+  );
+  assert.equal(r.service.sessions.size, 0);
+});
+
+test('a game with too few players refuses to start with a useful message', async () => {
+  const r = rig();
+  const host = fake({ id: 'u1' });
+  await r.service.startGame({ interaction: host.interaction, kind: 'chain', rounds: 1 });
+  const game = r.service.activeIn('c1').game;
+
+  for (const id of ['u2', 'u3']) {
+    const press = fake({ id, customId: `ch:${game.id}:join` });
+    await r.service.handleButton(press.interaction);
+  }
+  // Remove one player so the table is one short of chain's minimum.
+  const leave = fake({ id: 'u3', customId: `ch:${game.id}:leave` });
+  await r.service.handleButton(leave.interaction);
+
+  const start = fake({ id: 'u1', customId: `ch:${game.id}:start` });
+  await r.service.handleButton(start.interaction);
+
+  assert.match(start.replies[0].content, /at least 3 players/);
+  assert.equal(game.phase, 'lobby');
 });

@@ -1,0 +1,15 @@
+node_modules
+data
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+.github
+test
+test-support
+docs
+*.md
+!README.md
+*.log
+.DS_Store
