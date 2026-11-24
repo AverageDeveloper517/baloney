@@ -2,6 +2,11 @@
 
 **Nine Discord party games, zero setup, one message per game.**
 
+[![CI](https://github.com/AverageDeveloper517/baloney/actions/workflows/ci.yml/badge.svg)](https://github.com/AverageDeveloper517/baloney/actions/workflows/ci.yml)
+[![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Version](https://img.shields.io/badge/version-2.0.0-5865f2)](CHANGELOG.md)
+
 Run a command, press **Join**, and the whole game lives inside a single message
 that edits itself. No dashboard, no API keys, no accounts, no paid commands, no
 premium tier. Invite it and play.
@@ -9,6 +14,28 @@ premium tier. Invite it and play.
 `/bluff` · `/mostlikely` · `/trivia` · `/wyr` · `/number` · `/duel` · `/chain` ·
 `/impostor` · `/scatter` — plus `/party` for a whole night of games with one
 champion.
+
+**Repo:** <https://github.com/AverageDeveloper517/baloney> · **Version 2.0.0**
+
+<details>
+<summary><strong>Contents</strong></summary>
+
+- [Why this one gets invited](#why-this-one-gets-invited)
+- [The games](#the-games)
+- [Party mode](#party-mode)
+- [Progression (cosmetic only)](#progression-cosmetic-only)
+- [Commands](#commands)
+- [Quick start](#quick-start)
+- [Permissions](#permissions)
+- [How one round works](#how-one-round-works)
+- [Data and privacy](#data-and-privacy)
+- [Hosting](#hosting)
+- [Tests](#tests)
+- [Project layout](#project-layout)
+- [Customising](#customising)
+- [Troubleshooting](#troubleshooting)
+
+</details>
 
 ---
 
@@ -124,9 +151,10 @@ receipt. `/top` ranks the server by wins, lies, XP, coins, games or quiz answers
 | `/setup [rounds] [pace] [reset]` | optional server defaults (Manage Server) |
 | `/debug` | runtime status, bot owner only |
 
-Every game command except `/duel` takes `rounds` and supports a per-command override. `/setup`
-sets optional server defaults: rounds (1–8) and pace (`fast`, `standard`,
-`relaxed`). **No setup is required**; without it each game uses its own defaults.
+Every game command except `/duel` takes `rounds` and supports a per-command
+override. `/setup` sets optional server defaults: rounds (1–8) and pace (`fast`,
+`standard`, `relaxed`). **No setup is required**; without it each game uses its
+own defaults.
 
 ---
 
@@ -280,6 +308,10 @@ Free tiers are fine — the bot is idle when nobody is playing.
 in one server. Without it, commands are global and can take up to an hour.
 `OWNER_ID` is optional and only enables `/debug`.
 
+Step-by-step guides live in [`docs/SELF-HOSTING.md`](docs/SELF-HOSTING.md)
+(systemd, Docker, PaaS and backups) and [`docs/GAMES.md`](docs/GAMES.md) (rules
+and scoring for every game).
+
 ---
 
 ## Tests
@@ -385,3 +417,7 @@ No build step. Edit, run `npm test`, restart.
 ## Licence
 
 MIT. No paid commands, no keys, no tracking.
+
+See [`CHANGELOG.md`](CHANGELOG.md) for release notes and
+[`CONTRIBUTING.md`](CONTRIBUTING.md) if you want to add a game or a content
+bank.
